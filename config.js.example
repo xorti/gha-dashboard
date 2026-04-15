@@ -1,0 +1,16 @@
+// GitHub Actions Dashboard — Configuration
+// Copy this file to config.js and fill in your values.
+//
+// Token scopes needed:
+//   - Public repos only:  no scopes required (token still helps with rate limits)
+//   - Private repos:      repo + workflow
+
+window.GHA_CONFIG = {
+  token: 'ghp_YOUR_TOKEN_HERE',
+  username: 'your-github-username',
+  refreshInterval: 30, // seconds between auto-refreshes
+  repos: [
+    'owner/repo1',
+    'owner/repo2'
+  ]
+};
