@@ -65,6 +65,24 @@
   #refresh-btn:hover { background: #30363d; }
   #refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  #notify-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #8b949e;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+
+  #notify-btn:hover { background: #30363d; }
+  #notify-btn.granted { color: #3fb950; border-color: #3fb950; }
+  #notify-btn.denied  { color: #f85149; border-color: #f85149; }
+
   #refresh-btn.spinning svg { animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -235,6 +253,66 @@
     color: #8b949e;
     font-variant-numeric: tabular-nums;
   }
+
+  #toast-container {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 8px;
+    z-index: 100;
+  }
+
+  .toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 12px 14px;
+    min-width: 260px;
+    max-width: 360px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    cursor: pointer;
+    animation: toast-in 0.2s ease;
+  }
+
+  .toast.hiding { animation: toast-out 0.2s ease forwards; }
+
+  @keyframes toast-in  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes toast-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(10px); } }
+
+  .toast-badge {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 700;
+    margin-top: 1px;
+  }
+
+  .toast-body { flex: 1; min-width: 0; }
+
+  .toast-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e6edf3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .toast-sub {
+    font-size: 12px;
+    color: #8b949e;
+    margin-top: 2px;
+  }
 </style>
 </head>
 <body>
@@ -249,6 +327,11 @@
   <div class="header-right">
     <span class="countdown" id="countdown"></span>
     <span id="last-updated"></span>
+    <button id="notify-btn" title="Enable notifications">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2zm.995-14.901a1 1 0 1 0-1.99 0A5.002 5.002 0 0 0 3 6c0 1.098-.5 6-2 7h14c-1.5-1-2-5.902-2-7 0-2.42-1.72-4.44-4.005-4.901z"/>
+      </svg>
+    </button>
     <button id="refresh-btn">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
         <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
@@ -260,17 +343,96 @@
 </header>
 
 <main id="main"></main>
+<div id="toast-container"></div>
 
 <script>
 (function () {
   const cfg = window.GHA_CONFIG;
   const main = document.getElementById('main');
   const refreshBtn = document.getElementById('refresh-btn');
+  const notifyBtn = document.getElementById('notify-btn');
   const lastUpdatedEl = document.getElementById('last-updated');
   const countdownEl = document.getElementById('countdown');
 
   let countdownTimer = null;
   let secondsLeft = 0;
+
+  // --- Notifications ---
+  // Map of runId -> { status, conclusion } from the previous refresh
+  const prevStates = new Map();
+  let isFirstLoad = true;
+
+  function updateNotifyBtn() {
+    const perm = Notification.permission;
+    notifyBtn.classList.toggle('granted', perm === 'granted');
+    notifyBtn.classList.toggle('denied',  perm === 'denied');
+    notifyBtn.title = perm === 'granted' ? 'Notifications on'
+                    : perm === 'denied'  ? 'Notifications blocked — check browser settings'
+                    : 'Enable notifications';
+  }
+
+  notifyBtn.addEventListener('click', async () => {
+    if (!('Notification' in window)) return;
+    if (Notification.permission !== 'granted') {
+      await Notification.requestPermission();
+    }
+    updateNotifyBtn();
+  });
+
+  updateNotifyBtn();
+
+  const toastContainer = document.getElementById('toast-container');
+
+  function showToast(repo, run, from, to) {
+    const s = statusInfo(run);
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.innerHTML = `
+      <span class="toast-badge status-badge ${s.cls}">${s.icon}</span>
+      <div class="toast-body">
+        <div class="toast-title">${escHtml(repo)} — ${escHtml(run.name)}</div>
+        <div class="toast-sub">${escHtml(from)} → ${escHtml(to)}</div>
+      </div>`;
+
+    function dismiss() {
+      el.classList.add('hiding');
+      el.addEventListener('animationend', () => el.remove(), { once: true });
+    }
+
+    el.addEventListener('click', dismiss);
+    toastContainer.appendChild(el);
+    setTimeout(dismiss, 5000);
+  }
+
+  function notify(repo, run, from, to) {
+    showToast(repo, run, from, to);
+    if (Notification.permission === 'granted') {
+      new Notification(`${repo}: ${run.name}`, {
+        body: `${from} → ${to}`,
+        icon: 'https://github.com/favicon.ico',
+        tag: String(run.id)
+      });
+    }
+  }
+
+  function diffRuns(repo, runs) {
+    if (isFirstLoad) return; // don't notify on initial load
+    for (const run of runs) {
+      const prev = prevStates.get(run.id);
+      if (!prev) continue; // new run, no prior state to compare
+      const prevLabel = prev.status === 'completed' ? prev.conclusion : prev.status;
+      const currLabel = run.status === 'completed' ? run.conclusion : run.status;
+      if (prevLabel !== currLabel) {
+        notify(repo, run, prevLabel, currLabel);
+      }
+    }
+  }
+
+  function saveStates(runs) {
+    for (const run of runs) {
+      prevStates.set(run.id, { status: run.status, conclusion: run.conclusion });
+    }
+  }
 
   // --- Config validation ---
   function configError(msg) {
@@ -417,11 +579,15 @@
     await Promise.all(cfg.repos.map(async repo => {
       try {
         const runs = await fetchRepo(repo);
+        diffRuns(repo, runs);
+        saveStates(runs);
         updateCard(repo, runs, null);
       } catch (err) {
         updateCard(repo, [], err.message);
       }
     }));
+
+    isFirstLoad = false;
 
     const now = new Date();
     lastUpdatedEl.textContent = `Updated ${now.toLocaleTimeString()}`;
