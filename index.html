@@ -87,12 +87,34 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   main {
-    max-width: 900px;
+    max-width: 1400px;
     margin: 0 auto;
     padding: 24px 16px;
     display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 24px;
+  }
+
+  @media (max-width: 900px) {
+    main { flex-direction: column; }
+  }
+
+  .column {
+    flex: 1;
+    min-width: 0;
+    display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 16px;
+  }
+
+  .column-heading {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #8b949e;
+    padding: 0 2px;
   }
 
   .config-error {
@@ -202,6 +224,7 @@
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+    align-items: center;
   }
 
   .run-meta span { display: flex; align-items: center; gap: 3px; }
@@ -254,6 +277,23 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* --- Review chip --- */
+  .review-chip {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+
+  .review-chip.approved          { background: #1a4429; color: #3fb950; }
+  .review-chip.changes-requested { background: #3d1a1a; color: #f85149; }
+  .review-chip.draft             { background: #21262d; color: #8b949e; }
+  .review-chip.pending           { background: #21262d; color: #8b949e; }
+
+  /* --- Toasts --- */
   #toast-container {
     position: fixed;
     bottom: 20px;
@@ -342,24 +382,34 @@
   </div>
 </header>
 
-<main id="main"></main>
+<main id="main">
+  <div class="column" id="pr-column">
+    <span class="column-heading">Pull Requests</span>
+  </div>
+  <div class="column" id="actions-column">
+    <span class="column-heading">Actions</span>
+  </div>
+</main>
 <div id="toast-container"></div>
 
 <script>
 (function () {
   const cfg = window.GHA_CONFIG;
   const main = document.getElementById('main');
+  const prColumn = document.getElementById('pr-column');
+  const actionsColumn = document.getElementById('actions-column');
   const refreshBtn = document.getElementById('refresh-btn');
   const notifyBtn = document.getElementById('notify-btn');
   const lastUpdatedEl = document.getElementById('last-updated');
   const countdownEl = document.getElementById('countdown');
+  const toastContainer = document.getElementById('toast-container');
 
   let countdownTimer = null;
   let secondsLeft = 0;
 
   // --- Notifications ---
-  // Map of runId -> { status, conclusion } from the previous refresh
-  const prevStates = new Map();
+  const prevActionStates = new Map(); // runId -> { status, conclusion }
+  const prevPRStates = new Map();     // "repo#number" -> { ci, review }
   let isFirstLoad = true;
 
   function updateNotifyBtn() {
@@ -381,17 +431,14 @@
 
   updateNotifyBtn();
 
-  const toastContainer = document.getElementById('toast-container');
-
-  function showToast(repo, run, from, to) {
-    const s = statusInfo(run);
+  function showToast(cls, icon, title, sub) {
     const el = document.createElement('div');
     el.className = 'toast';
     el.innerHTML = `
-      <span class="toast-badge status-badge ${s.cls}">${s.icon}</span>
+      <span class="toast-badge status-badge ${cls}">${icon}</span>
       <div class="toast-body">
-        <div class="toast-title">${escHtml(repo)} — ${escHtml(run.name)}</div>
-        <div class="toast-sub">${escHtml(from)} → ${escHtml(to)}</div>
+        <div class="toast-title">${title}</div>
+        <div class="toast-sub">${sub}</div>
       </div>`;
 
     function dismiss() {
@@ -405,7 +452,8 @@
   }
 
   function notify(repo, run, from, to) {
-    showToast(repo, run, from, to);
+    const s = statusInfo(run);
+    showToast(s.cls, s.icon, `${escHtml(repo)} — ${escHtml(run.name)}`, `${escHtml(from)} → ${escHtml(to)}`);
     if (Notification.permission === 'granted') {
       new Notification(`${repo}: ${run.name}`, {
         body: `${from} → ${to}`,
@@ -415,22 +463,42 @@
     }
   }
 
-  function diffRuns(repo, runs) {
-    if (isFirstLoad) return; // don't notify on initial load
+  function diffActionRuns(repo, runs) {
+    if (isFirstLoad) return;
     for (const run of runs) {
-      const prev = prevStates.get(run.id);
-      if (!prev) continue; // new run, no prior state to compare
+      const prev = prevActionStates.get(run.id);
+      if (!prev) continue;
       const prevLabel = prev.status === 'completed' ? prev.conclusion : prev.status;
       const currLabel = run.status === 'completed' ? run.conclusion : run.status;
-      if (prevLabel !== currLabel) {
-        notify(repo, run, prevLabel, currLabel);
+      if (prevLabel !== currLabel) notify(repo, run, prevLabel, currLabel);
+    }
+  }
+
+  function saveActionStates(runs) {
+    for (const run of runs) {
+      prevActionStates.set(run.id, { status: run.status, conclusion: run.conclusion });
+    }
+  }
+
+  function diffPRs(repo, prs) {
+    if (isFirstLoad) return;
+    for (const pr of prs) {
+      const key = `${repo}#${pr.number}`;
+      const prev = prevPRStates.get(key);
+      if (!prev) continue;
+      if (prev.ci !== pr._ci || prev.review !== pr._review) {
+        const ciLabel = ciInfo(pr._ci);
+        showToast(ciLabel.cls, ciLabel.icon,
+          `${escHtml(repo)} #${pr.number}`,
+          `${escHtml(pr.title.slice(0, 60))}${pr.title.length > 60 ? '…' : ''}`
+        );
       }
     }
   }
 
-  function saveStates(runs) {
-    for (const run of runs) {
-      prevStates.set(run.id, { status: run.status, conclusion: run.conclusion });
+  function savePRStates(repo, prs) {
+    for (const pr of prs) {
+      prevPRStates.set(`${repo}#${pr.number}`, { ci: pr._ci, review: pr._review });
     }
   }
 
@@ -483,11 +551,27 @@
     return { cls: 'unknown', icon: '?', label: run.status };
   }
 
+  // ci is one of: 'success' | 'failure' | 'running' | 'unknown'
+  function ciInfo(ci) {
+    if (ci === 'success') return { cls: 'success', icon: '✓', label: 'CI passed' };
+    if (ci === 'failure') return { cls: 'failure', icon: '✗', label: 'CI failed' };
+    if (ci === 'running') return { cls: 'running', icon: '●', label: 'CI running' };
+    return { cls: 'unknown', icon: '?', label: 'No CI' };
+  }
+
+  function mergeLabel(state) {
+    if (state === 'clean')   return '⬆ Ready';
+    if (state === 'dirty')   return '✗ Conflicts';
+    if (state === 'blocked') return '⊘ Blocked';
+    if (state === 'behind')  return '↓ Behind';
+    return null;
+  }
+
   function escHtml(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
-  // --- Render ---
+  // --- Actions render ---
   function renderSkeleton(repoName) {
     return `
       <div class="repo-card" id="card-${repoName.replace('/','-')}">
@@ -552,6 +636,84 @@
     el.outerHTML = renderCard(repoName, runs, error);
   }
 
+  // --- PR render ---
+  function renderPRSkeleton(repoName) {
+    return `
+      <div class="repo-card" id="pr-card-${repoName.replace('/','-')}">
+        <div class="repo-header">
+          <a class="repo-name" href="https://github.com/${escHtml(repoName)}/pulls" target="_blank" rel="noopener">${escHtml(repoName)}</a>
+          <span class="run-count">loading…</span>
+        </div>
+        <div class="skeleton">
+          <div class="skel-row" style="width:75%"></div>
+          <div class="skel-row" style="width:55%"></div>
+          <div class="skel-row" style="width:65%"></div>
+        </div>
+      </div>`;
+  }
+
+  function renderPRCard(repoName, prs, error) {
+    const id = `pr-card-${repoName.replace('/', '-')}`;
+    let body;
+
+    if (error) {
+      body = `<div class="repo-error">⚠ ${escHtml(error)}</div>`;
+    } else if (prs.length === 0) {
+      body = `<div class="repo-empty">No open PRs for <strong>${escHtml(cfg.username)}</strong> in this repo.</div>`;
+    } else {
+      const items = prs.map(pr => {
+        const ci = ciInfo(pr._ci);
+        const ago = relativeTime(pr.updated_at);
+        const branch = pr.head && pr.head.ref ? pr.head.ref : '';
+        const merge = mergeLabel(pr.mergeable_state);
+
+        let reviewChip = '';
+        if (pr.draft) {
+          reviewChip = `<span class="review-chip draft">Draft</span>`;
+        } else if (pr._review === 'approved') {
+          reviewChip = `<span class="review-chip approved">✓ Approved</span>`;
+        } else if (pr._review === 'changes_requested') {
+          reviewChip = `<span class="review-chip changes-requested">✗ Changes</span>`;
+        } else {
+          reviewChip = `<span class="review-chip pending">○ Pending</span>`;
+        }
+
+        return `
+          <li class="run-item">
+            <span class="status-badge ${ci.cls}" title="${ci.label}">${ci.icon}</span>
+            <div class="run-info">
+              <div class="run-name">#${pr.number} ${escHtml(pr.title)}</div>
+              <div class="run-meta">
+                ${branch ? `<span>⎇ ${escHtml(branch)}</span>` : ''}
+                ${reviewChip}
+                ${merge ? `<span>${escHtml(merge)}</span>` : ''}
+                <span>${escHtml(ago)}</span>
+              </div>
+            </div>
+            <a class="run-link" href="${escHtml(pr.html_url)}" target="_blank" rel="noopener">open ↗</a>
+          </li>`;
+      }).join('');
+      body = `<ul class="run-list">${items}</ul>`;
+    }
+
+    const countLabel = error ? 'error' : `${prs.length} PR${prs.length !== 1 ? 's' : ''}`;
+    return `
+      <div class="repo-card" id="${id}">
+        <div class="repo-header">
+          <a class="repo-name" href="https://github.com/${escHtml(repoName)}/pulls" target="_blank" rel="noopener">${escHtml(repoName)}</a>
+          <span class="run-count">${countLabel}</span>
+        </div>
+        ${body}
+      </div>`;
+  }
+
+  function updatePRCard(repoName, prs, error) {
+    const id = `pr-card-${repoName.replace('/', '-')}`;
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.outerHTML = renderPRCard(repoName, prs, error);
+  }
+
   // --- Fetch ---
   async function fetchRepo(repo) {
     const [owner, name] = repo.split('/');
@@ -565,27 +727,130 @@
     return data.workflow_runs || [];
   }
 
-  // --- Main refresh loop ---
-  async function refresh() {
-    refreshBtn.disabled = true;
-    refreshBtn.classList.add('spinning');
-    clearCountdown();
+  async function fetchCheckRuns(owner, name, sha) {
+    const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${encodeURIComponent(sha)}/check-runs?per_page=100`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.check_runs || [];
+  }
 
-    // Show skeletons on first load
-    if (main.children.length === 0) {
-      main.innerHTML = cfg.repos.map(renderSkeleton).join('');
+  async function fetchReviews(owner, name, number) {
+    const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls/${number}/reviews`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) return [];
+    return await res.json();
+  }
+
+  async function fetchPRs(repo) {
+    const [owner, name] = repo.split('/');
+
+    // Use search API so we find all PRs involving the user, not just the most recent 20
+    const q = encodeURIComponent(`is:pr is:open involves:${cfg.username} repo:${owner}/${name}`);
+    const searchUrl = `https://api.github.com/search/issues?q=${q}&per_page=100`;
+    const searchRes = await fetch(searchUrl, { headers });
+    if (!searchRes.ok) {
+      const body = await searchRes.json().catch(() => ({}));
+      throw new Error(body.message || `HTTP ${searchRes.status}`);
+    }
+    const { items } = await searchRes.json();
+
+    if (items.length === 0) return [];
+
+    // Fetch full PR objects in parallel — needed for head.sha, head.ref, mergeable_state, requested_reviewers
+    const fullPRs = await Promise.all(
+      items.map(item =>
+        fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls/${item.number}`, { headers })
+          .then(r => r.ok ? r.json() : null)
+          .catch(() => null)
+      )
+    );
+    const prs = fullPRs.filter(Boolean);
+
+    // Fan-out: fetch CI + reviews for each PR in parallel
+    await Promise.all(prs.map(async pr => {
+      const sha = pr.head.sha;
+      const [checkRuns, reviews] = await Promise.all([
+        fetchCheckRuns(owner, name, sha),
+        fetchReviews(owner, name, pr.number)
+      ]);
+
+      // Aggregate CI
+      if (checkRuns.length === 0) {
+        pr._ci = 'unknown';
+      } else {
+        const statuses = checkRuns.map(c =>
+          (c.status === 'in_progress' || c.status === 'queued') ? 'running'
+          : (['failure','timed_out','action_required','startup_failure'].includes(c.conclusion)) ? 'failure'
+          : 'success'
+        );
+        if (statuses.includes('running'))      pr._ci = 'running';
+        else if (statuses.includes('failure')) pr._ci = 'failure';
+        else                                   pr._ci = 'success';
+      }
+
+      // Aggregate reviews: last review per reviewer, ignoring COMMENTED/DISMISSED
+      const lastByReviewer = new Map();
+      for (const r of reviews) {
+        if (r.state === 'COMMENTED' || r.state === 'DISMISSED') continue;
+        lastByReviewer.set(r.user.login, r.state);
+      }
+      const states = [...lastByReviewer.values()];
+      if (states.includes('CHANGES_REQUESTED'))    pr._review = 'changes_requested';
+      else if (states.length > 0 && states.every(s => s === 'APPROVED')) pr._review = 'approved';
+      else                                         pr._review = 'pending';
+    }));
+
+    return prs;
+  }
+
+  // --- Refresh loops ---
+  async function refreshActions() {
+    if (actionsColumn.querySelectorAll('.repo-card').length === 0) {
+      const heading = actionsColumn.querySelector('.column-heading');
+      cfg.repos.forEach(repo => {
+        heading.insertAdjacentHTML('afterend', renderSkeleton(repo));
+      });
     }
 
     await Promise.all(cfg.repos.map(async repo => {
       try {
         const runs = await fetchRepo(repo);
-        diffRuns(repo, runs);
-        saveStates(runs);
+        diffActionRuns(repo, runs);
+        saveActionStates(runs);
         updateCard(repo, runs, null);
       } catch (err) {
         updateCard(repo, [], err.message);
       }
     }));
+  }
+
+  async function refreshPRs() {
+    if (prColumn.querySelectorAll('.repo-card').length === 0) {
+      const heading = prColumn.querySelector('.column-heading');
+      cfg.repos.forEach(repo => {
+        heading.insertAdjacentHTML('afterend', renderPRSkeleton(repo));
+      });
+    }
+
+    await Promise.all(cfg.repos.map(async repo => {
+      try {
+        const prs = await fetchPRs(repo);
+        diffPRs(repo, prs);
+        savePRStates(repo, prs);
+        updatePRCard(repo, prs, null);
+      } catch (err) {
+        updatePRCard(repo, [], err.message);
+      }
+    }));
+  }
+
+  async function refresh() {
+    refreshBtn.disabled = true;
+    refreshBtn.classList.add('spinning');
+    clearCountdown();
+
+    await Promise.all([refreshActions(), refreshPRs()]);
 
     isFirstLoad = false;
 
